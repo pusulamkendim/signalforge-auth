@@ -3,3 +3,6 @@ members = [
     "packages/auth-service",
     "packages/auth-client",
 ]
+
+[dependency-groups]
+dev = ["bump-my-version>=0.28"]

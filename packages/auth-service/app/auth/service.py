@@ -24,7 +24,7 @@ from app.core.security import (
 
 # Single constant keeps all "wrong credentials" paths indistinguishable,
 # preventing user-enumeration via differing error messages.
-_INVALID_CREDENTIALS = "Invalid credentials"
+_INVALID_CREDENTIALS = "INVALID_CREDENTIALS"
 
 
 class AuthService:
@@ -50,7 +50,7 @@ class AuthService:
         if existing:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
-                detail="Email already registered",
+                detail="EMAIL_EXISTS",
             )
 
         # 2. Create user record
@@ -120,7 +120,14 @@ class AuthService:
         if not verify_password(request.password, user.password_hash or ""):
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, _INVALID_CREDENTIALS)
 
-        # 5-9. Issue tokens and persist the session
+        # 5. Email must be verified before a session is granted
+        if not user.is_verified:
+            raise HTTPException(
+                status.HTTP_401_UNAUTHORIZED,
+                detail="EMAIL_NOT_VERIFIED",
+            )
+
+        # 6-9. Issue tokens and persist the session
         access_token, plain_token = await self.create_session(user, ip, user_agent)
         return user, access_token, plain_token
 
@@ -141,26 +148,26 @@ class AuthService:
             select(RefreshToken).where(RefreshToken.token_hash == token_hash)
         )
         if not record:
-            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid refresh token")
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "INVALID_TOKEN")
 
         # 2. Expiry check — make tzinfo explicit for asyncpg datetime objects
         expires_at = record.expires_at
         if expires_at.tzinfo is None:
             expires_at = expires_at.replace(tzinfo=timezone.utc)
         if expires_at < now:
-            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Token expired")
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "TOKEN_EXPIRED")
 
         # 3. Revoked token presented → theft; invalidate entire family
         if record.is_revoked:
             await self._revoke_family(record.family_id)
             await self.db.commit()
-            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Token reuse detected")
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "TOKEN_REUSE_DETECTED")
 
         # 4. Already-used token presented → replay attack; same response
         if record.used_at is not None:
             await self._revoke_family(record.family_id)
             await self.db.commit()
-            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Token reuse detected")
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "TOKEN_REUSE_DETECTED")
 
         # 5. Mark current token as consumed
         record.is_revoked = True
@@ -190,7 +197,7 @@ class AuthService:
             select(User).where(User.id == record.user_id)
         )
         if not user:
-            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid refresh token")
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "INVALID_TOKEN")
 
         subscription = await self._get_user_subscription(record.user_id)
         plan_type = subscription.plan_type if subscription else "free"

@@ -79,7 +79,7 @@ def decode_access_token(token: str) -> dict:
     except JWTError:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Could not validate credentials",
+            detail="UNAUTHORIZED",
             headers={"WWW-Authenticate": "Bearer"},
         )
 

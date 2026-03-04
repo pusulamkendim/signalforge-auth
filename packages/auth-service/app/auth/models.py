@@ -133,10 +133,13 @@ class Session(Base):
 
 
 # ---------------------------------------------------------------------------
-# EmailVerificationToken — one-time tokens for email confirm / password reset
+# AuthToken — one-time tokens for email verification and password reset.
+# Extensible: token_type is a plain string (e.g. "email_verification",
+# "password_reset") so SMS or other channel types can be added later.
+# The plain token is NEVER stored — only the SHA-256 hex hash.
 # ---------------------------------------------------------------------------
-class EmailVerificationToken(Base):
-    __tablename__ = "email_verification_tokens"
+class AuthToken(Base):
+    __tablename__ = "auth_tokens"
 
     user_id: Mapped[UUID] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
@@ -144,20 +147,20 @@ class EmailVerificationToken(Base):
     token_hash: Mapped[str] = mapped_column(String, nullable=False)
     # DB column is "type"; attribute renamed to avoid collision with Python built-in
     token_type: Mapped[str] = mapped_column(String, name="type", nullable=False)
-    # Populated only for email_change tokens
-    new_email: Mapped[str | None] = mapped_column(String, nullable=True)
     expires_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
     )
     used_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    ip_address: Mapped[str | None] = mapped_column(String, nullable=True)
+    user_agent: Mapped[str | None] = mapped_column(String, nullable=True)
 
     # Relationships
     user: Mapped[User] = relationship("User")
 
     def __repr__(self) -> str:
-        return f"<EmailVerificationToken id={self.id!r} token_type={self.token_type!r}>"
+        return f"<AuthToken id={self.id!r} token_type={self.token_type!r}>"
 
 
 # ---------------------------------------------------------------------------

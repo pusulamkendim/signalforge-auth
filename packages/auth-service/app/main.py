@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse
 
 from app.auth.router import router as auth_router
 from app.core.config import get_auth_settings
+from app.core.limiter import RateLimitExceeded, limiter, _rate_limit_exceeded_handler
 from app.core.middleware import AuthEnvelopeMiddleware
 
 
@@ -34,6 +35,9 @@ async def lifespan(app: FastAPI):
 # ---------------------------------------------------------------------------
 
 app = FastAPI(title="SignalForge Auth Service", lifespan=lifespan)
+
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 app.add_middleware(AuthEnvelopeMiddleware)
 app.add_middleware(

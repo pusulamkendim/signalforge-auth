@@ -33,16 +33,31 @@ from app.main import app
 # ---------------------------------------------------------------------------
 
 _TEST_DB_NAME = "signalforge_auth_test"
-_TEST_DB_URL = f"postgresql+asyncpg://postgres:postgres@db:5432/{_TEST_DB_NAME}"
-_ADMIN_DB_URL = "postgresql://postgres:postgres@db:5432/postgres"
+_TEST_DB_URL = f"postgresql+asyncpg://postgres:postgres@localhost:5433/{_TEST_DB_NAME}"
+_ADMIN_DB_URL = "postgresql://postgres:postgres@localhost:5433/postgres"
 
 # Truncation order respects FK dependencies (most-dependent first).
 _TRUNCATE = (
-    "sessions, refresh_tokens, email_verification_tokens, "
+    "sessions, refresh_tokens, auth_tokens, "
     "usage_logs, usage_limits, permissions, audit_logs, email_logs, "
     "plan_permission_mappings, permission_definitions, "
     "subscriptions, auth_identities, anonymous_sessions, users, stripe_event_logs"
 )
+
+
+# ---------------------------------------------------------------------------
+# Session-scoped: disable rate limiting for all tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _disable_rate_limits() -> None:
+    """Disable slowapi rate limits for all tests (all share 127.0.0.1)."""
+    from app.core.limiter import limiter
+    original = limiter.enabled
+    limiter.enabled = False
+    yield
+    limiter.enabled = original
 
 
 # ---------------------------------------------------------------------------
@@ -125,20 +140,47 @@ async def client(db_session: AsyncSession) -> AsyncGenerator[AsyncClient, None]:
 
 
 # ---------------------------------------------------------------------------
-# Function-scoped: pre-registered user
+# Function-scoped: pre-verified user (bypasses email flow)
 # ---------------------------------------------------------------------------
+
+# Import models here to avoid circular imports at module level
+from app.auth.models import AuthIdentity, Subscription, User
+from app.core.security import hash_password
 
 
 @pytest.fixture
-async def registered_user(client: AsyncClient) -> dict[str, Any]:
-    """Register a test user and return the full AuthResponse as a dict.
+async def verified_user(client: AsyncClient, db_session: AsyncSession) -> dict[str, Any]:
+    """Insert a verified user directly into the DB, log them in, and return AuthResponse.
 
-    Returned keys: ``user`` (id, email, role, is_verified, plan_type)
-    and ``tokens`` (access_token, refresh_token, token_type, expires_in).
+    Register endpoint now returns { ok: true } (no tokens), so this fixture
+    bypasses the email-verification flow by creating the user in the DB directly
+    with ``is_verified=True``. All tests that just need an authenticated user
+    should use this fixture instead of calling /register.
     """
+    user = User(
+        email="test@example.com",
+        password_hash=hash_password("password123"),
+        is_active=True,
+        is_verified=True,
+        token_version=0,
+    )
+    db_session.add(user)
+    await db_session.flush()
+    db_session.add(
+        AuthIdentity(
+            user_id=user.id,
+            provider="email",
+            provider_id="test@example.com",
+        )
+    )
+    db_session.add(
+        Subscription(user_id=user.id, plan_type="free", status="active")
+    )
+    await db_session.commit()
+
     resp = await client.post(
-        "/api/v1/auth/register",
+        "/api/v1/auth/login",
         json={"email": "test@example.com", "password": "password123"},
     )
-    assert resp.status_code == 201, f"Registration failed: {resp.text}"
+    assert resp.status_code == 200, f"Login failed: {resp.text}"
     return resp.json()["data"]

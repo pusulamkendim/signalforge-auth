@@ -37,7 +37,7 @@ async def get_current_user(
     if not raw_id:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Could not validate credentials",
+            detail="UNAUTHORIZED",
         )
 
     # Validate that the claim is a well-formed UUID before hitting the DB.
@@ -46,27 +46,27 @@ async def get_current_user(
     except ValueError:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Could not validate credentials",
+            detail="UNAUTHORIZED",
         )
 
     user = await db.scalar(select(User).where(User.id == user_id))
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Could not validate credentials",
+            detail="UNAUTHORIZED",
         )
 
     if not user.is_active:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Could not validate credentials",
+            detail="UNAUTHORIZED",
         )
 
     # Guard against stale JWTs issued before a logout-all or token invalidation.
     if payload.get("token_version") != user.token_version:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token invalidated",
+            detail="SESSION_EXPIRED",
         )
 
     return user
@@ -88,7 +88,7 @@ def require_role(role: str):
         if user.role != role and user.role != "admin":
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="Insufficient role",
+                detail="PERMISSION_DENIED",
             )
         return user
 
@@ -131,7 +131,7 @@ def require_permission(permission: str):
         if permission not in user_permissions:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="Insufficient permission",
+                detail="PERMISSION_DENIED",
             )
         return user
 

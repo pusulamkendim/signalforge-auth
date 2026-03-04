@@ -33,6 +33,20 @@ class AuthSettings(BaseSettings):
     access_token_expire_minutes: int = 15
     refresh_token_expire_days: int = 7
 
+    # -- Verification tokens --------------------------------------------------
+    email_verification_token_expire_hours: int = 24
+    password_reset_token_expire_hours: int = 1
+
+    # -- Email (Resend) -------------------------------------------------------
+    resend_api_key: str = ""
+    email_from: str = "noreply@example.com"
+    frontend_url: str = "http://localhost:3000"
+
+    # -- Rate limiting --------------------------------------------------------
+    rate_limit_login: str = "10/minute"
+    rate_limit_resend_verification: str = "3/hour"
+    rate_limit_password_reset: str = "3/hour"
+
     # -- General --------------------------------------------------------------
     environment: str = "development"
 

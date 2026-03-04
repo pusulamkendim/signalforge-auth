@@ -15,8 +15,9 @@ class UserInfo(BaseModel):
     id: UUID
     email: str
     role: str
-    plan: str
-    permissions: list[str]
+    is_verified: bool
+    plan: str = "free"
+    permissions: list[str] = []
 
     @property
     def is_admin(self) -> bool:

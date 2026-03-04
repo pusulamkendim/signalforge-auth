@@ -41,13 +41,13 @@ async def test_register_success(
     assert resp.status_code == 201, f"expected 201, got {resp.status_code}: {resp.text}"
     data = resp.json()["data"]
 
-    assert data["user"]["email"] == "test@example.com", "email mismatch"
-    assert data["tokens"]["access_token"], "access_token must not be empty"
-    assert data["tokens"]["refresh_token"], "refresh_token must not be empty"
+    # Register now returns { ok: true } — no tokens issued until email is verified
+    assert data == {"ok": True}, f"expected {{ok: true}}, got {data!r}"
 
     # DB — user row
     user = await db_session.scalar(select(User).where(User.email == "test@example.com"))
     assert user is not None, "User row should exist in DB"
+    assert user.is_verified is False, "New user should not be verified yet"
 
     # DB — email identity
     identity = await db_session.scalar(
@@ -67,7 +67,7 @@ async def test_register_success(
 
 
 async def test_login_success(
-    registered_user: dict[str, Any], client: AsyncClient
+    verified_user: dict[str, Any], client: AsyncClient
 ) -> None:
     resp = await client.post(
         "/api/v1/auth/login",
@@ -80,11 +80,11 @@ async def test_login_success(
 
 
 async def test_refresh_success(
-    registered_user: dict[str, Any],
+    verified_user: dict[str, Any],
     client: AsyncClient,
     db_session: AsyncSession,
 ) -> None:
-    refresh_token = registered_user["tokens"]["refresh_token"]
+    refresh_token = verified_user["tokens"]["refresh_token"]
 
     resp = await client.post(
         "/api/v1/auth/refresh",
@@ -107,11 +107,11 @@ async def test_refresh_success(
 
 
 async def test_logout_success(
-    registered_user: dict[str, Any],
+    verified_user: dict[str, Any],
     client: AsyncClient,
     db_session: AsyncSession,
 ) -> None:
-    access_token = registered_user["tokens"]["access_token"]
+    access_token = verified_user["tokens"]["access_token"]
 
     resp = await client.post(
         "/api/v1/auth/logout",
@@ -126,7 +126,7 @@ async def test_logout_success(
     assert session is None, "Session should be deleted after logout"
 
     # Refresh token family must be revoked
-    refresh_token = registered_user["tokens"]["refresh_token"]
+    refresh_token = verified_user["tokens"]["refresh_token"]
     record = await db_session.scalar(
         select(RefreshToken).where(RefreshToken.token_hash == hash_token(refresh_token))
     )
@@ -134,16 +134,27 @@ async def test_logout_success(
     assert record.is_revoked is True, "refresh_token should be revoked after logout"
 
 
-async def test_full_flow(client: AsyncClient) -> None:
-    """Register → Login → Refresh → Logout — all in sequence."""
+async def test_full_flow(client: AsyncClient, db_session: AsyncSession) -> None:
+    """Register → Verify email → Login → Refresh → Logout — all in sequence."""
+    from app.auth.models import AuthToken
+    from app.auth.verification_service import VerificationService
+
     # 1. Register
     reg = await client.post(
         "/api/v1/auth/register",
         json={"email": "flow@example.com", "password": "password123"},
     )
     assert reg.status_code == 201, f"Register failed: {reg.text}"
+    assert reg.json()["data"] == {"ok": True}
 
-    # 2. Login
+    # 2. Verify email (bypass email delivery — call service directly)
+    user = await db_session.scalar(select(User).where(User.email == "flow@example.com"))
+    svc = VerificationService(db_session)
+    plain_token = await svc.create_token(user, "email_verification", "127.0.0.1", "test-ua")
+    verify = await client.post("/api/v1/auth/verify-email", json={"token": plain_token})
+    assert verify.status_code == 200, f"Verify failed: {verify.text}"
+
+    # 3. Login
     login = await client.post(
         "/api/v1/auth/login",
         json={"email": "flow@example.com", "password": "password123"},
@@ -170,12 +181,12 @@ async def test_full_flow(client: AsyncClient) -> None:
 
 
 async def test_logout_expired_token(
-    registered_user: dict[str, Any],
+    verified_user: dict[str, Any],
     client: AsyncClient,
 ) -> None:
     """An expired access token must be rejected with 401."""
     settings = get_auth_settings()
-    payload = decode_access_token(registered_user["tokens"]["access_token"])
+    payload = decode_access_token(verified_user["tokens"]["access_token"])
     expired_payload = {
         **payload,
         "exp": datetime.now(timezone.utc) - timedelta(minutes=1),
@@ -199,11 +210,11 @@ async def test_logout_invalid_token(client: AsyncClient) -> None:
 
 
 async def test_logout_idempotent(
-    registered_user: dict[str, Any],
+    verified_user: dict[str, Any],
     client: AsyncClient,
 ) -> None:
     """Calling logout twice with the same token must return 204 both times."""
-    access_token = registered_user["tokens"]["access_token"]
+    access_token = verified_user["tokens"]["access_token"]
     headers = {"Authorization": f"Bearer {access_token}"}
 
     resp1 = await client.post("/api/v1/auth/logout", headers=headers)
@@ -219,12 +230,12 @@ async def test_logout_idempotent(
 
 
 async def test_refresh_token_reuse_detection(
-    registered_user: dict[str, Any],
+    verified_user: dict[str, Any],
     client: AsyncClient,
     db_session: AsyncSession,
 ) -> None:
     """Reusing a consumed token must revoke the entire rotation family."""
-    refresh_token_1 = registered_user["tokens"]["refresh_token"]
+    refresh_token_1 = verified_user["tokens"]["refresh_token"]
 
     # First use: token_1 → token_2 (token_1 is now consumed / is_revoked=True)
     resp1 = await client.post(
@@ -256,12 +267,12 @@ async def test_refresh_token_reuse_detection(
 
 
 async def test_revoked_token_rejected(
-    registered_user: dict[str, Any],
+    verified_user: dict[str, Any],
     client: AsyncClient,
 ) -> None:
     """A token that was revoked via logout must be rejected on /refresh."""
-    access_token = registered_user["tokens"]["access_token"]
-    refresh_token = registered_user["tokens"]["refresh_token"]
+    access_token = verified_user["tokens"]["access_token"]
+    refresh_token = verified_user["tokens"]["refresh_token"]
 
     # Logout revokes the refresh token family
     await client.post(
@@ -285,13 +296,13 @@ async def test_revoked_token_rejected(
 
 
 async def test_token_version_invalidation(
-    registered_user: dict[str, Any],
+    verified_user: dict[str, Any],
     client: AsyncClient,
     db_session: AsyncSession,
 ) -> None:
     """A JWT issued before a token_version bump must be rejected."""
-    access_token = registered_user["tokens"]["access_token"]
-    email = registered_user["user"]["email"]
+    access_token = verified_user["tokens"]["access_token"]
+    email = verified_user["user"]["email"]
 
     # Simulate logout-all / password change by incrementing token_version
     await db_session.execute(
@@ -305,8 +316,8 @@ async def test_token_version_invalidation(
         headers={"Authorization": f"Bearer {access_token}"},
     )
     assert resp.status_code == 401, f"expected 401, got {resp.status_code}"
-    assert resp.json()["error"]["message"] == "Token invalidated", (
-        f"expected message='Token invalidated', got {resp.json()['error']['message']!r}"
+    assert resp.json()["error"]["message"] == "SESSION_EXPIRED", (
+        f"expected message='SESSION_EXPIRED', got {resp.json()['error']['message']!r}"
     )
 
 
@@ -328,11 +339,22 @@ async def test_register_duplicate_email(client: AsyncClient) -> None:
     assert "already registered" in resp2.json()["error"]["message"].lower()
 
 
-async def test_login_wrong_password(client: AsyncClient) -> None:
-    await client.post(
-        "/api/v1/auth/register",
-        json={"email": "wrongpass@example.com", "password": "password123"},
+async def test_login_wrong_password(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    # Create a verified user directly in DB (register alone leaves user unverified)
+    user = User(
+        email="wrongpass@example.com",
+        password_hash=hash_password("password123"),
+        is_active=True,
+        is_verified=True,
+        token_version=0,
     )
+    db_session.add(user)
+    await db_session.flush()
+    db_session.add(AuthIdentity(user_id=user.id, provider="email", provider_id="wrongpass@example.com"))
+    db_session.add(Subscription(user_id=user.id, plan_type="free", status="active"))
+    await db_session.commit()
 
     resp = await client.post(
         "/api/v1/auth/login",
@@ -356,11 +378,11 @@ async def test_login_nonexistent_email(client: AsyncClient) -> None:
 
 
 async def test_require_role_forbidden(
-    registered_user: dict[str, Any],
+    verified_user: dict[str, Any],
     client: AsyncClient,
 ) -> None:
     """A regular user must receive 403 when accessing an admin-only endpoint."""
-    access_token = registered_user["tokens"]["access_token"]
+    access_token = verified_user["tokens"]["access_token"]
 
     resp = await client.get(
         "/api/v1/auth/admin-only",
@@ -382,12 +404,12 @@ async def test_invalid_access_token(client: AsyncClient) -> None:
 
 
 async def test_expired_refresh_token(
-    registered_user: dict[str, Any],
+    verified_user: dict[str, Any],
     client: AsyncClient,
     db_session: AsyncSession,
 ) -> None:
     """A RefreshToken whose expires_at is in the past must be rejected."""
-    email = registered_user["user"]["email"]
+    email = verified_user["user"]["email"]
     user = await db_session.scalar(select(User).where(User.email == email))
     assert user is not None
 
@@ -410,8 +432,8 @@ async def test_expired_refresh_token(
     assert resp.status_code == 401, (
         f"expected 401 for expired token, got {resp.status_code}"
     )
-    assert resp.json()["error"]["message"] == "Token expired", (
-        f"expected message='Token expired', got {resp.json()['error']['message']!r}"
+    assert resp.json()["error"]["message"] == "TOKEN_EXPIRED", (
+        f"expected message='TOKEN_EXPIRED', got {resp.json()['error']['message']!r}"
     )
 
 
@@ -540,11 +562,19 @@ async def test_require_permission_with_mapping(
         headers=admin_headers,
     )
 
-    # Register a regular free user and log in
-    await client.post(
-        "/api/v1/auth/register",
-        json={"email": "freeuser@example.com", "password": "password123"},
+    # Create a verified free user directly in DB and log in
+    free_user = User(
+        email="freeuser@example.com",
+        password_hash=hash_password("password123"),
+        is_active=True,
+        is_verified=True,
+        token_version=0,
     )
+    db_session.add(free_user)
+    await db_session.flush()
+    db_session.add(AuthIdentity(user_id=free_user.id, provider="email", provider_id="freeuser@example.com"))
+    db_session.add(Subscription(user_id=free_user.id, plan_type="free", status="active"))
+    await db_session.commit()
     login_resp = await client.post(
         "/api/v1/auth/login",
         json={"email": "freeuser@example.com", "password": "password123"},
@@ -577,11 +607,19 @@ async def test_require_permission_forbidden(
     )
     # "analysis:create" (what /test-permission checks) is also NOT mapped
 
-    # Register and log in as a free user
-    await client.post(
-        "/api/v1/auth/register",
-        json={"email": "freeuser2@example.com", "password": "password123"},
+    # Create a verified free user directly in DB and log in
+    free_user2 = User(
+        email="freeuser2@example.com",
+        password_hash=hash_password("password123"),
+        is_active=True,
+        is_verified=True,
+        token_version=0,
     )
+    db_session.add(free_user2)
+    await db_session.flush()
+    db_session.add(AuthIdentity(user_id=free_user2.id, provider="email", provider_id="freeuser2@example.com"))
+    db_session.add(Subscription(user_id=free_user2.id, plan_type="free", status="active"))
+    await db_session.commit()
     login_resp = await client.post(
         "/api/v1/auth/login",
         json={"email": "freeuser2@example.com", "password": "password123"},

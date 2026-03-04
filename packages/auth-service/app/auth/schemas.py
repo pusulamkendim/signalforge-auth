@@ -28,6 +28,23 @@ class RefreshRequest(BaseModel):
     refresh_token: str
 
 
+class VerifyEmailRequest(BaseModel):
+    token: str
+
+
+class ResendVerificationRequest(BaseModel):
+    email: EmailStr
+
+
+class RequestPasswordResetRequest(BaseModel):
+    email: EmailStr
+
+
+class ResetPasswordRequest(BaseModel):
+    token: str
+    new_password: str = Field(min_length=8)
+
+
 # ---------------------------------------------------------------------------
 # Response schemas
 # ---------------------------------------------------------------------------
@@ -41,11 +58,18 @@ class TokenResponse(BaseModel):
 
 
 class UserResponse(BaseModel):
+    """Canonical user representation returned by /register, /login, and /me.
+
+    Single source of truth — schema changes here propagate to all three
+    endpoints and, via openapi.json, to generated TypeScript types.
+    """
+
     id: UUID
     email: str
     role: str
     is_verified: bool
-    plan_type: str = "free"  # populated from the subscriptions table
+    plan: str = "free"  # populated from the subscriptions table
+    permissions: list[str] = []  # resolved from plan + explicit grants
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -53,6 +77,12 @@ class UserResponse(BaseModel):
 class AuthResponse(BaseModel):
     user: UserResponse
     tokens: TokenResponse
+
+
+class OkResponse(BaseModel):
+    """Sentinel response for boolean-outcome endpoints."""
+
+    ok: bool = True
 
 
 # ---------------------------------------------------------------------------

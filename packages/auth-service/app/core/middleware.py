@@ -44,6 +44,10 @@ class AuthEnvelopeMiddleware(BaseHTTPMiddleware):
 
         response = await call_next(request)
 
+        # 204 / 304 and similar status codes must not carry a body.
+        if response.status_code in (204, 304):
+            return response
+
         # Consume the body iterator exactly once.
         raw_body: bytes = b"".join([chunk async for chunk in response.body_iterator])
 

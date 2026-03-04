@@ -17,17 +17,25 @@ from app.auth.schemas import (
     DefinePermissionRequest,
     LoginRequest,
     MapPermissionRequest,
+    OkResponse,
     PermissionDefinitionResponse,
     PlanPermissionMappingResponse,
     RefreshRequest,
     RegisterRequest,
+    RequestPasswordResetRequest,
+    ResendVerificationRequest,
+    ResetPasswordRequest,
     TokenResponse,
     UserResponse,
+    VerifyEmailRequest,
 )
 from app.auth.service import AuthService
+from app.auth.verification_service import VerificationService
 from app.core.config import get_auth_settings
-from app.core.security import decode_access_token
 from app.core.database import get_db
+from app.core.email_service import EmailService
+from app.core.limiter import limiter
+from app.core.security import decode_access_token
 
 router = APIRouter()
 
@@ -47,14 +55,30 @@ def _token_response(access_token: str, refresh_token: str) -> TokenResponse:
     )
 
 
-def _user_response(user: User, plan_type: str) -> UserResponse:
+async def _user_response(
+    user: User,
+    plan_type: str,
+    db: AsyncSession,
+) -> UserResponse:
+    """Build the canonical UserResponse for a given user and plan."""
+    svc = PermissionService(db)
+    permissions = await svc.get_user_permissions(user.id, plan_type)
     return UserResponse(
         id=user.id,
         email=user.email,
         role=user.role,
         is_verified=user.is_verified,
-        plan_type=plan_type,
+        plan=plan_type,
+        permissions=permissions,
     )
+
+
+async def _plan_type(user_id: UUID, db: AsyncSession) -> str:
+    """Resolve plan_type from the subscriptions table, defaulting to 'free'."""
+    subscription = await db.scalar(
+        select(Subscription).where(Subscription.user_id == user_id)
+    )
+    return subscription.plan_type if subscription else "free"
 
 
 def _ip(request: Request) -> str:
@@ -66,33 +90,34 @@ def _ip(request: Request) -> str:
 # ---------------------------------------------------------------------------
 
 
-@router.post("/register", response_model=AuthResponse, status_code=201)
+@router.post("/register", response_model=OkResponse, status_code=201)
 async def register(
     body: RegisterRequest,
     request: Request,
     db: AsyncSession = Depends(get_db),
-) -> AuthResponse:
-    """Create a new account and return an authenticated session.
+) -> OkResponse:
+    """Create a new account, send a verification email, and return { ok: true }.
 
+    The user cannot log in until they click the verification link.
     Raises 409 if the email address is already registered.
     """
-    service = AuthService(db)
     ip = _ip(request)
     ua = request.headers.get("user-agent", "")
 
+    service = AuthService(db)
     user = await service.register(body)
-    access_token, plain_token = await service.create_session(user, ip, ua)
 
-    subscription = await service._get_user_subscription(user.id)
-    plan_type = subscription.plan_type if subscription else "free"
+    v_service = VerificationService(db)
+    plain_token = await v_service.create_token(user, "email_verification", ip, ua)
 
-    return AuthResponse(
-        user=_user_response(user, plan_type),
-        tokens=_token_response(access_token, plain_token),
-    )
+    email_svc = EmailService(db)
+    await email_svc.send_verification_email(user, plain_token)
+
+    return OkResponse()
 
 
 @router.post("/login", response_model=AuthResponse)
+@limiter.limit(lambda: get_auth_settings().rate_limit_login)
 async def login(
     body: LoginRequest,
     request: Request,
@@ -101,19 +126,18 @@ async def login(
     """Authenticate with email/password and return a session.
 
     Returns 401 for any authentication failure. The detail string is intentionally
-    generic to prevent user-enumeration.
+    generic to prevent user-enumeration, except for EMAIL_NOT_VERIFIED which
+    signals that the account exists but has not been confirmed yet.
     """
     service = AuthService(db)
     ip = _ip(request)
     ua = request.headers.get("user-agent", "")
 
     user, access_token, plain_token = await service.login(body, ip, ua)
-
-    subscription = await service._get_user_subscription(user.id)
-    plan_type = subscription.plan_type if subscription else "free"
+    plan = await _plan_type(user.id, db)
 
     return AuthResponse(
-        user=_user_response(user, plan_type),
+        user=await _user_response(user, plan, db),
         tokens=_token_response(access_token, plain_token),
     )
 
@@ -155,31 +179,114 @@ async def logout(
 
 
 # ---------------------------------------------------------------------------
+# Email verification
+# ---------------------------------------------------------------------------
+
+
+@router.post("/verify-email", response_model=OkResponse)
+async def verify_email(
+    body: VerifyEmailRequest,
+    db: AsyncSession = Depends(get_db),
+) -> OkResponse:
+    """Consume a verification token and mark the user's email as verified.
+
+    Returns 401 for invalid, expired, or already-used tokens.
+    After success all remaining email_verification tokens for the user are deleted.
+    """
+    v_service = VerificationService(db)
+    await v_service.verify_email(body.token)
+    return OkResponse()
+
+
+@router.post("/resend-verification", response_model=OkResponse)
+@limiter.limit(lambda: get_auth_settings().rate_limit_resend_verification)
+async def resend_verification(
+    body: ResendVerificationRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> OkResponse:
+    """Re-send the verification email.
+
+    Always returns { ok: true } regardless of whether the email exists or the
+    user is already verified (prevents user enumeration).
+    """
+    ip = _ip(request)
+    ua = request.headers.get("user-agent", "")
+
+    v_service = VerificationService(db)
+    result = await v_service.resend_verification(body.email, ip, ua)
+
+    if result is not None:
+        user, plain_token = result
+        email_svc = EmailService(db)
+        await email_svc.send_verification_email(user, plain_token)
+
+    return OkResponse()
+
+
+# ---------------------------------------------------------------------------
+# Password reset
+# ---------------------------------------------------------------------------
+
+
+@router.post("/request-password-reset", response_model=OkResponse)
+@limiter.limit(lambda: get_auth_settings().rate_limit_password_reset)
+async def request_password_reset(
+    body: RequestPasswordResetRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> OkResponse:
+    """Initiate a password reset flow.
+
+    Always returns { ok: true } regardless of whether the email exists
+    (prevents user enumeration).
+    """
+    ip = _ip(request)
+    ua = request.headers.get("user-agent", "")
+
+    v_service = VerificationService(db)
+    result = await v_service.request_password_reset(body.email, ip, ua)
+
+    if result is not None:
+        user, plain_token = result
+        email_svc = EmailService(db)
+        await email_svc.send_password_reset_email(user, plain_token)
+
+    return OkResponse()
+
+
+@router.post("/reset-password", response_model=OkResponse)
+async def reset_password(
+    body: ResetPasswordRequest,
+    db: AsyncSession = Depends(get_db),
+) -> OkResponse:
+    """Consume a password-reset token and update the user's password.
+
+    On success:
+    - password hash is updated with Argon2id
+    - all active sessions are revoked
+    - token_version is incremented (invalidates all outstanding JWTs)
+
+    Returns 401 for invalid, expired, or already-used tokens.
+    """
+    v_service = VerificationService(db)
+    await v_service.reset_password(body.token, body.new_password)
+    return OkResponse()
+
+
+# ---------------------------------------------------------------------------
 # User profile
 # ---------------------------------------------------------------------------
 
 
-@router.get("/me")
+@router.get("/me", response_model=UserResponse)
 async def get_me(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
-) -> dict:
+) -> UserResponse:
     """Return the authenticated user's profile including resolved permissions."""
-    subscription = await db.scalar(
-        select(Subscription).where(Subscription.user_id == user.id)
-    )
-    plan_type = subscription.plan_type if subscription else "free"
-
-    svc = PermissionService(db)
-    permissions = await svc.get_user_permissions(user.id, plan_type)
-
-    return {
-        "id": str(user.id),
-        "email": user.email,
-        "role": user.role,
-        "plan": plan_type,
-        "permissions": permissions,
-    }
+    plan = await _plan_type(user.id, db)
+    return await _user_response(user, plan, db)
 
 
 # ---------------------------------------------------------------------------
@@ -246,16 +353,15 @@ async def list_plan_permissions(
 # ---------------------------------------------------------------------------
 
 
-@router.get("/admin-only")
-async def admin_only(user: User = Depends(require_role("admin"))) -> dict[str, bool]:
+@router.get("/admin-only", response_model=OkResponse)
+async def admin_only(user: User = Depends(require_role("admin"))) -> OkResponse:
     """Admin-only sentinel endpoint used in role-enforcement tests."""
-    return {"ok": True}
+    return OkResponse()
 
 
-# Test-support endpoint — permission enforcement tests
-@router.get("/test-permission")
+@router.get("/test-permission", response_model=OkResponse)
 async def test_permission_endpoint(
     user: User = Depends(require_permission("analysis:create")),
-) -> dict[str, bool]:
+) -> OkResponse:
     """Requires the 'analysis:create' permission. Used by permission enforcement tests."""
-    return {"ok": True}
+    return OkResponse()
