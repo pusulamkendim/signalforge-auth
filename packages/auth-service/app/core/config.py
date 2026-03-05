@@ -50,6 +50,17 @@ class AuthSettings(BaseSettings):
     # -- CORS -----------------------------------------------------------------
     cors_origins: str = "*"  # comma-separated origins, e.g. "https://app.example.com,https://admin.example.com"
 
+    # -- OAuth (Google) -------------------------------------------------------
+    google_client_id: str = ""
+    google_client_secret: str = ""
+
+    # -- OAuth (GitHub) -------------------------------------------------------
+    github_client_id: str = ""
+    github_client_secret: str = ""
+
+    # -- OAuth (General) ------------------------------------------------------
+    oauth_redirect_uri_allowlist: str = "http://localhost:3000"  # comma-separated
+
     # -- General --------------------------------------------------------------
     environment: str = "development"
 

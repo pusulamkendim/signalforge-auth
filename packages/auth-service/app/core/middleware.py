@@ -44,8 +44,9 @@ class AuthEnvelopeMiddleware(BaseHTTPMiddleware):
 
         response = await call_next(request)
 
-        # 204 / 304 and similar status codes must not carry a body.
-        if response.status_code in (204, 304):
+        # 204 / 304 must not carry a body; 3xx redirects need their
+        # Location header preserved — pass through unchanged.
+        if response.status_code in (204, 304) or 300 <= response.status_code < 400:
             return response
 
         # Consume the body iterator exactly once.

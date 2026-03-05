@@ -10,6 +10,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from app.auth.oauth.router import router as oauth_router
 from app.auth.router import router as auth_router
 from app.core.config import get_auth_settings
 from app.core.limiter import RateLimitExceeded, limiter, _rate_limit_exceeded_handler
@@ -85,6 +86,7 @@ async def validation_exception_handler(_, exc: RequestValidationError) -> JSONRe
 # ---------------------------------------------------------------------------
 
 app.include_router(auth_router, prefix="/api/v1/auth", tags=["auth"])
+app.include_router(oauth_router, prefix="/api/v1/auth/oauth", tags=["oauth"])
 
 
 # ---------------------------------------------------------------------------
