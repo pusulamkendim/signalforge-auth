@@ -47,6 +47,9 @@ class AuthSettings(BaseSettings):
     rate_limit_resend_verification: str = "3/hour"
     rate_limit_password_reset: str = "3/hour"
 
+    # -- CORS -----------------------------------------------------------------
+    cors_origins: str = "*"  # comma-separated origins, e.g. "https://app.example.com,https://admin.example.com"
+
     # -- General --------------------------------------------------------------
     environment: str = "development"
 
@@ -60,6 +63,22 @@ class AuthSettings(BaseSettings):
         ):
             return v.replace("://", "+asyncpg://", 1)
         return v
+
+    def validate_production_settings(self) -> list[str]:
+        """Return a list of warnings for settings that look unsafe in production.
+
+        Called during lifespan startup when environment is not development/test.
+        """
+        warnings: list[str] = []
+        if not self.resend_api_key:
+            warnings.append("RESEND_API_KEY is empty — email delivery will fail")
+        if self.frontend_url == "http://localhost:3000":
+            warnings.append("FRONTEND_URL is still localhost — email links will be broken")
+        if self.cors_origins == "*":
+            warnings.append(
+                "CORS_ORIGINS is '*' — set explicit origins for production"
+            )
+        return warnings
 
 
 @lru_cache

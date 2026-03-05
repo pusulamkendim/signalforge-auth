@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from contextlib import asynccontextmanager
 from uuid import uuid4
 
@@ -14,6 +15,8 @@ from app.core.config import get_auth_settings
 from app.core.limiter import RateLimitExceeded, limiter, _rate_limit_exceeded_handler
 from app.core.middleware import AuthEnvelopeMiddleware
 
+logger = logging.getLogger(__name__)
+
 
 # ---------------------------------------------------------------------------
 # Lifespan — startup / shutdown
@@ -23,6 +26,17 @@ from app.core.middleware import AuthEnvelopeMiddleware
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _cfg = get_auth_settings()
+
+    if _cfg.secret_key == "change-me" and _cfg.environment not in ("development", "test"):
+        raise RuntimeError(
+            "SECRET_KEY is still set to the default 'change-me'. "
+            "Set a strong, random SECRET_KEY before running in production."
+        )
+
+    if _cfg.environment not in ("development", "test"):
+        for warning in _cfg.validate_production_settings():
+            logger.warning("CONFIG: %s", warning)
+
     _redis = aioredis.from_url(_cfg.redis_url, decode_responses=True)
     await _redis.ping()
     app.state.redis = _redis
@@ -40,9 +54,12 @@ app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 app.add_middleware(AuthEnvelopeMiddleware)
+
+_cfg = get_auth_settings()
+_origins = [o.strip() for o in _cfg.cors_origins.split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # tighten in production via env config
+    allow_origins=_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

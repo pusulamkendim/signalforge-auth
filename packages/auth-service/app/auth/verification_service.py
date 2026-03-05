@@ -166,7 +166,13 @@ class VerificationService:
         user.password_hash = hash_password(new_password)
         user.token_version += 1
 
-        record.used_at = datetime.now(timezone.utc)
+        # Delete all password_reset tokens for this user (prevents replay & table bloat)
+        await self.db.execute(
+            delete(AuthToken).where(
+                AuthToken.user_id == user.id,
+                AuthToken.token_type == "password_reset",
+            )
+        )
 
         # Revoke all active sessions (forces re-login everywhere)
         await self.db.execute(

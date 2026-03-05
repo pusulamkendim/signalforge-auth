@@ -336,7 +336,7 @@ async def test_register_duplicate_email(client: AsyncClient) -> None:
     assert resp2.status_code == 409, (
         f"expected 409 on duplicate email, got {resp2.status_code}"
     )
-    assert "already registered" in resp2.json()["error"]["message"].lower()
+    assert resp2.json()["error"]["message"] == "EMAIL_EXISTS"
 
 
 async def test_login_wrong_password(

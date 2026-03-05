@@ -292,8 +292,7 @@ async def test_reset_password_success(
             AuthToken.token_type == "password_reset",
         )
     )
-    assert token_rec is not None
-    assert token_rec.used_at is not None, "Token used_at must be set after reset"
+    assert token_rec is None, "Token must be deleted after successful reset"
 
 
 # ===========================================================================
